@@ -1,10 +1,10 @@
 DOCKER_TAG = bluenviron/mediamtx
 
 # Base images for each platform
-BASE_IMAGE.amd64 = ${DEBIAN_IMAGE}
-BASE_IMAGE.rpi32 = ${RPI32_IMAGE}
-BASE_IMAGE.rpi64 = ${RPI64_IMAGE}
-BASE_IMAGE.jetson = ${JETSON_IMAGE}
+DOCKERIMG_BASE_IMAGE.amd64 = ${DEBIAN_IMAGE}
+DOCKERIMG_BASE_IMAGE.rpi32 = ${RPI32_IMAGE}
+DOCKERIMG_BASE_IMAGE.rpi64 = ${RPI64_IMAGE}
+DOCKERIMG_BASE_IMAGE.jetson = ${JETSON_IMAGE}
 
 # Map simple platform names to Docker BuildKit platform strings
 PLATFORM_MAP.amd64 = linux/amd64
@@ -15,14 +15,14 @@ PLATFORM_MAP.jetson = linux/arm64/v8
 # Default platform
 PLATFORM ?= amd64
 TARGETPLATFORM = $(PLATFORM_MAP.$(PLATFORM))
-BASE_IMAGE = $(BASE_IMAGE.$(PLATFORM))
+DOCKERIMG_BASE_IMAGE = $(DOCKERIMG_BASE_IMAGE.$(PLATFORM))
 
 # Default flag to include ffmpeg
 USE_FFMPEG ?= false
 
 # Dockerfile templates
 define DOCKERFILE_DOCKERIMG
-FROM $(BASE_IMAGE)
+FROM $(DOCKERIMG_BASE_IMAGE)
 ARG TARGETPLATFORM
 ADD tmp/binaries/$$TARGETPLATFORM.tar.gz /
 #ENTRYPOINT [ "/mediamtx" ]
@@ -31,7 +31,7 @@ endef
 export DOCKERFILE_DOCKERIMG
 
 define DOCKERFILE_DOCKERIMG_FFMPEG
-FROM $(BASE_IMAGE)
+FROM $(DOCKERIMG_BASE_IMAGE)
 RUN apt update && apt install -y --no-install-recommends ffmpeg python3-pip python3-venv && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv /opt/yt-dlp-venv && \
     /opt/yt-dlp-venv/bin/pip install --no-cache-dir yt-dlp && \
@@ -47,14 +47,14 @@ dockerimg:
 	$(eval VERSION := $(shell git describe --tags | tr -d v))
 
 	# Validate platform
-	@if [ -z "$(TARGETPLATFORM)" ] || [ -z "$(BASE_IMAGE)" ]; then \
+	@if [ -z "$(TARGETPLATFORM)" ] || [ -z "$(DOCKERIMG_BASE_IMAGE)" ]; then \
 	  echo "Error: Unsupported PLATFORM '$(PLATFORM)'"; \
 	  echo "Supported platforms: amd64, rpi32, rpi64, jetson"; \
 	  exit 1; \
 	fi
 
 	@echo "Building for platform: $(PLATFORM) ($(TARGETPLATFORM))"
-	@echo "Using base image: $(BASE_IMAGE)"
+	@echo "Using base image: $(DOCKERIMG_BASE_IMAGE)"
 	@echo "Including FFmpeg: $(USE_FFMPEG)"
 
 	rm -rf tmp
