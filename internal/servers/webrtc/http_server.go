@@ -20,7 +20,6 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
 	"github.com/bluenviron/mediamtx/internal/protocols/whip"
-	"github.com/bluenviron/mediamtx/internal/restrictnetwork"
 )
 
 //go:embed publish_index.html
@@ -48,12 +47,6 @@ func mergePathAndQuery(path string, rawQuery string) string {
 	return res
 }
 
-func writeError(ctx *gin.Context, statusCode int, err error) {
-	ctx.JSON(statusCode, &defs.APIError{
-		Error: err.Error(),
-	})
-}
-
 func sessionLocation(publish bool, path string, rawQuery string, secret uuid.UUID) string {
 	ret := "/" + path + "/"
 
@@ -74,12 +67,14 @@ func sessionLocation(publish bool, path string, rawQuery string, secret uuid.UUI
 
 type httpServer struct {
 	address        string
+	dumpPackets    bool
 	encryption     bool
 	serverKey      string
 	serverCert     string
-	allowOrigin    string
+	allowOrigins   []string
 	trustedProxies conf.IPNetworks
 	readTimeout    conf.Duration
+	writeTimeout   conf.Duration
 	pathManager    serverPathManager
 	parent         *Server
 
@@ -90,21 +85,29 @@ func (s *httpServer) initialize() error {
 	router := gin.New()
 	router.SetTrustedProxies(s.trustedProxies.ToTrustedProxies()) //nolint:errcheck
 
-	router.Use(s.middlewareOrigin)
+	router.Use(s.middlewarePreflightRequests)
 
 	router.Use(s.onRequest)
 
-	network, address := restrictnetwork.Restrict("tcp", s.address)
+	var proto string
+	if s.encryption {
+		proto = "webrtcs"
+	} else {
+		proto = "webrtc"
+	}
 
 	s.inner = &httpp.Server{
-		Network:     network,
-		Address:     address,
-		ReadTimeout: time.Duration(s.readTimeout),
-		Encryption:  s.encryption,
-		ServerCert:  s.serverCert,
-		ServerKey:   s.serverKey,
-		Handler:     router,
-		Parent:      s,
+		Address:           s.address,
+		AllowOrigins:      s.allowOrigins,
+		DumpPackets:       s.dumpPackets,
+		DumpPacketsPrefix: proto + "_server_conn",
+		ReadTimeout:       time.Duration(s.readTimeout),
+		WriteTimeout:      time.Duration(s.writeTimeout),
+		Encryption:        s.encryption,
+		ServerCert:        s.serverCert,
+		ServerKey:         s.serverKey,
+		Handler:           router,
+		Parent:            s,
 	}
 	err := s.inner.Initialize()
 	if err != nil {
@@ -115,7 +118,7 @@ func (s *httpServer) initialize() error {
 }
 
 // Log implements logger.Writer.
-func (s *httpServer) Log(level logger.Level, format string, args ...interface{}) {
+func (s *httpServer) Log(level logger.Level, format string, args ...any) {
 	s.parent.Log(level, format, args...)
 }
 
@@ -123,14 +126,22 @@ func (s *httpServer) close() {
 	s.inner.Close()
 }
 
+func (s *httpServer) writeErrorNoLog(ctx *gin.Context, status int, err error) {
+	ctx.AbortWithStatusJSON(status, &defs.APIError{
+		Status: defs.APIErrorStatusError,
+		Error:  err.Error(),
+	})
+}
+
 func (s *httpServer) checkAuthOutsideSession(ctx *gin.Context, pathName string, publish bool) bool {
 	_, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
 		AccessRequest: defs.PathAccessRequest{
 			Name:        pathName,
+			Query:       ctx.Request.URL.RawQuery,
 			Publish:     publish,
-			IP:          net.ParseIP(ctx.ClientIP()),
 			Proto:       auth.ProtocolWebRTC,
-			HTTPRequest: ctx.Request,
+			Credentials: httpp.Credentials(ctx.Request),
+			IP:          net.ParseIP(ctx.ClientIP()),
 		},
 	})
 	if err != nil {
@@ -138,20 +149,20 @@ func (s *httpServer) checkAuthOutsideSession(ctx *gin.Context, pathName string, 
 		if errors.As(err, &terr) {
 			if terr.AskCredentials {
 				ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
-				ctx.Writer.WriteHeader(http.StatusUnauthorized)
+				s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 				return false
 			}
 
-			s.Log(logger.Info, "connection %v failed to authenticate: %v", httpp.RemoteAddr(ctx), terr.Message)
+			s.Log(logger.Info, "connection %v failed to authenticate: %v", httpp.RemoteAddr(ctx), terr.Wrapped)
 
-			// wait some seconds to mitigate brute force attacks
+			// wait some seconds to delay brute force attacks
 			<-time.After(auth.PauseAfterError)
 
-			writeError(ctx, http.StatusUnauthorized, terr)
+			s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 			return false
 		}
 
-		writeError(ctx, http.StatusInternalServerError, err)
+		s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
 		return false
 	}
 
@@ -165,7 +176,7 @@ func (s *httpServer) onWHIPOptions(ctx *gin.Context, pathName string, publish bo
 
 	servers, err := s.parent.generateICEServers(true)
 	if err != nil {
-		writeError(ctx, http.StatusInternalServerError, err)
+		s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -179,7 +190,7 @@ func (s *httpServer) onWHIPOptions(ctx *gin.Context, pathName string, publish bo
 func (s *httpServer) onWHIPPost(ctx *gin.Context, pathName string, publish bool) {
 	contentType := httpp.ParseContentType(ctx.Request.Header.Get("Content-Type"))
 	if contentType != "application/sdp" {
-		writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid Content-Type"))
+		s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("invalid Content-Type"))
 		return
 	}
 
@@ -197,29 +208,29 @@ func (s *httpServer) onWHIPPost(ctx *gin.Context, pathName string, publish bool)
 	})
 	if res.err != nil {
 		var terr *auth.Error
-		if errors.As(err, &terr) {
+		if errors.As(res.err, &terr) {
 			if terr.AskCredentials {
 				ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
-				ctx.AbortWithStatus(http.StatusUnauthorized)
+				s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 				return
 			}
 
-			s.Log(logger.Info, "connection %v failed to authenticate: %v", httpp.RemoteAddr(ctx), terr.Message)
+			s.Log(logger.Info, "connection %v failed to authenticate: %v", httpp.RemoteAddr(ctx), terr.Wrapped)
 
-			// wait some seconds to mitigate brute force attacks
+			// wait some seconds to delay brute force attacks
 			<-time.After(auth.PauseAfterError)
 
-			writeError(ctx, http.StatusUnauthorized, terr)
+			s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 			return
 		}
 
-		writeError(ctx, res.errStatusCode, res.err)
+		s.writeErrorNoLog(ctx, res.errStatusCode, res.err)
 		return
 	}
 
 	servers, err := s.parent.generateICEServers(true)
 	if err != nil {
-		writeError(ctx, http.StatusInternalServerError, err)
+		s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -232,18 +243,20 @@ func (s *httpServer) onWHIPPost(ctx *gin.Context, pathName string, publish bool)
 	ctx.Header("Location", sessionLocation(publish, pathName, ctx.Request.URL.RawQuery, res.sx.secret))
 	ctx.Writer.WriteHeader(http.StatusCreated)
 	ctx.Writer.Write(res.answer)
+
+	res.sx.Log(logger.Debug, "SDP answer:\n"+string(res.answer))
 }
 
 func (s *httpServer) onWHIPPatch(ctx *gin.Context, pathName string, rawSecret string) {
 	secret, err := uuid.Parse(rawSecret)
 	if err != nil {
-		writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid secret"))
+		s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("invalid secret"))
 		return
 	}
 
 	contentType := httpp.ParseContentType(ctx.Request.Header.Get("Content-Type"))
 	if contentType != "application/trickle-ice-sdpfrag" {
-		writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid Content-Type"))
+		s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("invalid Content-Type"))
 		return
 	}
 
@@ -254,7 +267,7 @@ func (s *httpServer) onWHIPPatch(ctx *gin.Context, pathName string, rawSecret st
 
 	candidates, err := whip.ICEFragmentUnmarshal(byts)
 	if err != nil {
-		writeError(ctx, http.StatusBadRequest, err)
+		s.writeErrorNoLog(ctx, http.StatusBadRequest, err)
 		return
 	}
 
@@ -265,20 +278,22 @@ func (s *httpServer) onWHIPPatch(ctx *gin.Context, pathName string, rawSecret st
 	})
 	if res.err != nil {
 		if errors.Is(res.err, ErrSessionNotFound) {
-			writeError(ctx, http.StatusNotFound, res.err)
+			s.writeErrorNoLog(ctx, http.StatusNotFound, res.err)
 		} else {
-			writeError(ctx, http.StatusInternalServerError, res.err)
+			s.writeErrorNoLog(ctx, http.StatusInternalServerError, res.err)
 		}
 		return
 	}
 
-	ctx.Writer.WriteHeader(http.StatusNoContent)
+	ctx.AbortWithStatusJSON(http.StatusNoContent, &defs.APIOK{
+		Status: defs.APIOKStatusOK,
+	})
 }
 
 func (s *httpServer) onWHIPDelete(ctx *gin.Context, pathName string, rawSecret string) {
 	secret, err := uuid.Parse(rawSecret)
 	if err != nil {
-		writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid secret"))
+		s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("invalid secret"))
 		return
 	}
 
@@ -288,14 +303,16 @@ func (s *httpServer) onWHIPDelete(ctx *gin.Context, pathName string, rawSecret s
 	})
 	if err != nil {
 		if errors.Is(err, ErrSessionNotFound) {
-			writeError(ctx, http.StatusNotFound, err)
+			s.writeErrorNoLog(ctx, http.StatusNotFound, err)
 		} else {
-			writeError(ctx, http.StatusInternalServerError, err)
+			s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
 		}
 		return
 	}
 
-	ctx.Writer.WriteHeader(http.StatusOK)
+	ctx.AbortWithStatusJSON(http.StatusOK, &defs.APIOK{
+		Status: defs.APIOKStatusOK,
+	})
 }
 
 func (s *httpServer) onPage(ctx *gin.Context, pathName string, publish bool) {
@@ -303,7 +320,11 @@ func (s *httpServer) onPage(ctx *gin.Context, pathName string, publish bool) {
 		return
 	}
 
-	ctx.Header("Cache-Control", "max-age=3600")
+	// Do not cache the HTML page.
+	// This prevents a bug in Firefox in which, when the page
+	// is loaded in an iframe and the iframe is deleted and recreated,
+	// WebRTC is unable to re-establish the connection.
+	ctx.Header("Cache-Control", "no-cache")
 	ctx.Header("Content-Type", "text/html")
 	ctx.Writer.WriteHeader(http.StatusOK)
 
@@ -314,11 +335,7 @@ func (s *httpServer) onPage(ctx *gin.Context, pathName string, publish bool) {
 	}
 }
 
-func (s *httpServer) middlewareOrigin(ctx *gin.Context) {
-	ctx.Header("Access-Control-Allow-Origin", s.allowOrigin)
-	ctx.Header("Access-Control-Allow-Credentials", "true")
-
-	// preflight requests
+func (s *httpServer) middlewarePreflightRequests(ctx *gin.Context) {
 	if ctx.Request.Method == http.MethodOptions &&
 		ctx.Request.Header.Get("Access-Control-Request-Method") != "" {
 		ctx.Header("Access-Control-Allow-Methods", "OPTIONS, GET, POST, PATCH, DELETE")
@@ -358,7 +375,7 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			// RFC draft-ietf-whip-09
 			// The WHIP endpoints MUST return an "405 Method Not Allowed" response
 			// for any HTTP GET, HEAD or PUT requests
-			writeError(ctx, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+			s.writeErrorNoLog(ctx, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
 		}
 		return
 	}

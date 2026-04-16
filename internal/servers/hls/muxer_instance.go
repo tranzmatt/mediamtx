@@ -1,6 +1,7 @@
 package hls
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -11,7 +12,6 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/hls"
 	"github.com/bluenviron/mediamtx/internal/stream"
-	"github.com/gin-gonic/gin"
 )
 
 type muxerInstance struct {
@@ -23,10 +23,10 @@ type muxerInstance struct {
 	directory       string
 	pathName        string
 	stream          *stream.Stream
-	bytesSent       *uint64
 	parent          logger.Writer
 
 	hmuxer *gohlslib.Muxer
+	reader *stream.Reader
 }
 
 func (mi *muxerInstance) initialize() error {
@@ -48,32 +48,36 @@ func (mi *muxerInstance) initialize() error {
 		},
 	}
 
-	err := hls.FromStream(mi.stream, mi, mi.hmuxer)
+	mi.reader = &stream.Reader{
+		SkipBytesSent: true,
+		Parent:        mi,
+	}
+
+	err := hls.FromStream(mi.stream.Desc, mi.reader, mi.hmuxer)
 	if err != nil {
 		return err
 	}
 
 	err = mi.hmuxer.Start()
 	if err != nil {
-		mi.stream.RemoveReader(mi)
 		return err
 	}
 
 	mi.Log(logger.Info, "is converting into HLS, %s",
-		defs.FormatsInfo(mi.stream.ReaderFormats(mi)))
+		defs.FormatsInfo(mi.reader.Formats()))
 
-	mi.stream.StartReader(mi)
+	mi.stream.AddReader(mi.reader)
 
 	return nil
 }
 
 // Log implements logger.Writer.
-func (mi *muxerInstance) Log(level logger.Level, format string, args ...interface{}) {
+func (mi *muxerInstance) Log(level logger.Level, format string, args ...any) {
 	mi.parent.Log(level, format, args...)
 }
 
 func (mi *muxerInstance) close() {
-	mi.stream.RemoveReader(mi)
+	mi.stream.RemoveReader(mi.reader)
 	mi.hmuxer.Close()
 	if mi.hmuxer.Directory != "" {
 		os.Remove(mi.hmuxer.Directory)
@@ -81,14 +85,9 @@ func (mi *muxerInstance) close() {
 }
 
 func (mi *muxerInstance) errorChan() chan error {
-	return mi.stream.ReaderError(mi)
+	return mi.reader.Error()
 }
 
-func (mi *muxerInstance) handleRequest(ctx *gin.Context) {
-	w := &responseWriterWithCounter{
-		ResponseWriter: ctx.Writer,
-		bytesSent:      mi.bytesSent,
-	}
-
-	mi.hmuxer.Handle(w, ctx.Request)
+func (mi *muxerInstance) handleRequest(w http.ResponseWriter, r *http.Request) {
+	mi.hmuxer.Handle(w, r)
 }

@@ -2,6 +2,7 @@ package recordstore
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"path/filepath"
 	"sort"
@@ -34,7 +35,7 @@ func fixedPathHasSegments(pathConf *conf.Path) bool {
 
 	commonPath := CommonPath(recordPath)
 
-	err := filepath.Walk(commonPath, func(fpath string, info fs.FileInfo, err error) error {
+	err := filepath.WalkDir(commonPath, func(fpath string, info fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -70,16 +71,19 @@ func regexpPathFindPathsWithSegments(pathConf *conf.Path) map[string]struct{} {
 
 	ret := make(map[string]struct{})
 
-	filepath.Walk(commonPath, func(fpath string, info fs.FileInfo, err error) error { //nolint:errcheck
+	filepath.WalkDir(commonPath, func(fpath string, info fs.DirEntry, err error) error { //nolint:errcheck
 		if err != nil {
 			return err
 		}
 
 		if !info.IsDir() {
 			var pa Path
-			ok := pa.Decode(recordPath, fpath)
-			if ok && pathConf.Regexp.FindStringSubmatch(pa.Path) != nil {
-				ret[pa.Path] = struct{}{}
+			if ok := pa.Decode(recordPath, fpath); ok {
+				if err = conf.IsValidPathName(pa.Path); err == nil {
+					if pathConf.Regexp.FindStringSubmatch(pa.Path) != nil {
+						ret[pa.Path] = struct{}{}
+					}
+				}
 			}
 		}
 
@@ -124,6 +128,11 @@ func FindSegments(
 	start *time.Time,
 	end *time.Time,
 ) ([]*Segment, error) {
+	// double protection against directory traversal attacks
+	if err := conf.IsValidPathName(pathName); err != nil {
+		return nil, fmt.Errorf("invalid path name: %w (%s)", err, pathName)
+	}
+
 	recordPath := PathAddExtension(
 		strings.ReplaceAll(pathConf.RecordPath, "%path", pathName),
 		pathConf.RecordFormat,
@@ -136,7 +145,7 @@ func FindSegments(
 	commonPath := CommonPath(recordPath)
 	var segments []*Segment
 
-	err := filepath.Walk(commonPath, func(fpath string, info fs.FileInfo, err error) error {
+	err := filepath.WalkDir(commonPath, func(fpath string, info fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -145,7 +154,7 @@ func FindSegments(
 			var pa Path
 			ok := pa.Decode(recordPath, fpath)
 
-			// gather all segments that starts before the end of the playback
+			// gather all segments that start before the end of the playback
 			if ok && (end == nil || !end.Before(pa.Start)) {
 				segments = append(segments, &Segment{
 					Fpath: fpath,
@@ -169,6 +178,10 @@ func FindSegments(
 	})
 
 	if start != nil {
+		if start.Before(segments[0].Start) {
+			return segments, nil
+		}
+
 		// find the segment that may contain the start of the playback and remove all previous ones
 		found := false
 		for i := 0; i < len(segments)-1; i++ {

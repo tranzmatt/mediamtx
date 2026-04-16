@@ -5,7 +5,7 @@ import (
 	"strconv"
 
 	"github.com/pion/sdp/v3"
-	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v4"
 )
 
 // ICEFragmentUnmarshal decodes an ICE fragment.
@@ -26,7 +26,8 @@ func ICEFragmentUnmarshal(buf []byte) ([]*webrtc.ICECandidateInit, error) {
 			return nil, fmt.Errorf("mid attribute is missing")
 		}
 
-		tmp, err := strconv.ParseUint(mid, 10, 16)
+		var tmp uint64
+		tmp, err = strconv.ParseUint(mid, 10, 16)
 		if err != nil {
 			return nil, fmt.Errorf("invalid mid attribute")
 		}
