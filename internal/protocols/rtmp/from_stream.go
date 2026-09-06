@@ -2,9 +2,11 @@
 package rtmp
 
 import (
+	"encoding/hex"
 	"errors"
 	"net"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/bluenviron/gortmplib"
@@ -13,6 +15,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/ac3"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/flac"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg1audio"
@@ -26,7 +29,7 @@ import (
 
 var errNoSupportedCodecsFrom = errors.New(
 	"the stream doesn't contain any supported codec, which are currently " +
-		"AV1, VP9, H265, H264, Opus, MPEG-4 Audio, MPEG-1/2 Audio, AC-3, G711, LPCM")
+		"AV1, VP9, H265, H264, Opus, FLAC, MPEG-4 Audio (AAC), MPEG-1/2 Audio (MP3), AC-3, G711, LPCM")
 
 func multiplyAndDivide2(v, m, d time.Duration) time.Duration {
 	secs := v / d
@@ -40,7 +43,8 @@ func timestampToDuration(t int64, clockRate int) time.Duration {
 
 // FromStream maps a MediaMTX stream to a RTMP stream.
 func FromStream(
-	desc *description.Session,
+	origDesc *description.Session,
+	outDesc *description.Session,
 	r *stream.Reader,
 	conn *gortmplib.ServerConn,
 	nconn net.Conn,
@@ -53,9 +57,9 @@ func FromStream(
 	legacyVideoTrackCount := 0
 	legacyAudioTrackCount := 0
 
-	for _, media := range desc.Medias {
-		for _, forma := range media.Formats {
-			switch forma := forma.(type) {
+	for i, origMedia := range origDesc.Medias {
+		for j, origFormat := range origMedia.Formats {
+			switch origFormat := origFormat.(type) {
 			case *format.AV1:
 				if slices.Contains(conn.FourCcList, any(fourCCToString(message.FourCCAV1))) {
 					track := &gortmplib.Track{
@@ -64,8 +68,8 @@ func FromStream(
 					tracks = append(tracks, track)
 
 					r.OnData(
-						media,
-						forma,
+						origMedia,
+						origFormat,
 						func(u *unit.Unit) error {
 							if u.NilPayload() {
 								return nil
@@ -74,7 +78,7 @@ func FromStream(
 							nconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 							return (*w).WriteAV1(
 								track,
-								timestampToDuration(u.PTS, forma.ClockRate()),
+								timestampToDuration(u.PTS, origFormat.ClockRate()),
 								u.Payload.(unit.PayloadAV1))
 						})
 				}
@@ -87,8 +91,8 @@ func FromStream(
 					tracks = append(tracks, track)
 
 					r.OnData(
-						media,
-						forma,
+						origMedia,
+						origFormat,
 						func(u *unit.Unit) error {
 							if u.NilPayload() {
 								return nil
@@ -97,19 +101,20 @@ func FromStream(
 							nconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 							return (*w).WriteVP9(
 								track,
-								timestampToDuration(u.PTS, forma.ClockRate()),
+								timestampToDuration(u.PTS, origFormat.ClockRate()),
 								u.Payload.(unit.PayloadVP9))
 						})
 				}
 
 			case *format.H265:
 				if slices.Contains(conn.FourCcList, any(fourCCToString(message.FourCCHEVC))) {
-					vps, sps, pps := forma.SafeParams()
+					outFormat := outDesc.Medias[i].Formats[j].(*format.H265)
+
 					track := &gortmplib.Track{
 						Codec: &codecs.H265{
-							VPS: vps,
-							SPS: sps,
-							PPS: pps,
+							VPS: outFormat.VPS,
+							SPS: outFormat.SPS,
+							PPS: outFormat.PPS,
 						},
 					}
 					tracks = append(tracks, track)
@@ -117,8 +122,8 @@ func FromStream(
 					var videoDTSExtractor *h265.DTSExtractor
 
 					r.OnData(
-						media,
-						forma,
+						origMedia,
+						origFormat,
 						func(u *unit.Unit) error {
 							if u.NilPayload() {
 								return nil
@@ -140,8 +145,8 @@ func FromStream(
 							nconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 							return (*w).WriteH265(
 								track,
-								timestampToDuration(u.PTS, forma.ClockRate()),
-								timestampToDuration(dts, forma.ClockRate()),
+								timestampToDuration(u.PTS, origFormat.ClockRate()),
+								timestampToDuration(dts, origFormat.ClockRate()),
 								u.Payload.(unit.PayloadH265))
 						})
 				}
@@ -149,11 +154,13 @@ func FromStream(
 			case *format.H264:
 				if isEnhanced || legacyVideoTrackCount == 0 {
 					legacyVideoTrackCount++
-					sps, pps := forma.SafeParams()
+
+					outFormat := outDesc.Medias[i].Formats[j].(*format.H264)
+
 					track := &gortmplib.Track{
 						Codec: &codecs.H264{
-							SPS: sps,
-							PPS: pps,
+							SPS: outFormat.SPS,
+							PPS: outFormat.PPS,
 						},
 					}
 					tracks = append(tracks, track)
@@ -161,8 +168,8 @@ func FromStream(
 					var videoDTSExtractor *h264.DTSExtractor
 
 					r.OnData(
-						media,
-						forma,
+						origMedia,
+						origFormat,
 						func(u *unit.Unit) error {
 							if u.NilPayload() {
 								return nil
@@ -202,8 +209,8 @@ func FromStream(
 							nconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 							return (*w).WriteH264(
 								track,
-								timestampToDuration(u.PTS, forma.ClockRate()),
-								timestampToDuration(dts, forma.ClockRate()),
+								timestampToDuration(u.PTS, origFormat.ClockRate()),
+								timestampToDuration(dts, origFormat.ClockRate()),
 								u.Payload.(unit.PayloadH264))
 						})
 				}
@@ -212,14 +219,18 @@ func FromStream(
 				if slices.Contains(conn.FourCcList, any(fourCCToString(message.FourCCOpus))) {
 					track := &gortmplib.Track{
 						Codec: &codecs.Opus{
-							ChannelCount: forma.ChannelCount,
+							IDHeader: &opus.IDHeader{
+								Version:      0x1,
+								ChannelCount: uint8(origFormat.ChannelCount),
+								PreSkip:      3840,
+							},
 						},
 					}
 					tracks = append(tracks, track)
 
 					r.OnData(
-						media,
-						forma,
+						origMedia,
+						origFormat,
 						func(u *unit.Unit) error {
 							if u.NilPayload() {
 								return nil
@@ -231,7 +242,7 @@ func FromStream(
 								nconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 								err := (*w).WriteOpus(
 									track,
-									timestampToDuration(pts, forma.ClockRate()),
+									timestampToDuration(pts, origFormat.ClockRate()),
 									pkt,
 								)
 								if err != nil {
@@ -250,14 +261,14 @@ func FromStream(
 					legacyAudioTrackCount++
 					track := &gortmplib.Track{
 						Codec: &codecs.MPEG4Audio{
-							Config: forma.Config,
+							Config: origFormat.Config,
 						},
 					}
 					tracks = append(tracks, track)
 
 					r.OnData(
-						media,
-						forma,
+						origMedia,
+						origFormat,
 						func(u *unit.Unit) error {
 							if u.NilPayload() {
 								return nil
@@ -269,7 +280,7 @@ func FromStream(
 								nconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 								err := (*w).WriteMPEG4Audio(
 									track,
-									timestampToDuration(pts, forma.ClockRate()),
+									timestampToDuration(pts, origFormat.ClockRate()),
 									au,
 								)
 								if err != nil {
@@ -282,25 +293,25 @@ func FromStream(
 				}
 
 			case *format.MPEG4AudioLATM:
-				if !forma.CPresent && (isEnhanced || legacyAudioTrackCount == 0) {
+				if !origFormat.CPresent && (isEnhanced || legacyAudioTrackCount == 0) {
 					legacyAudioTrackCount++
 					track := &gortmplib.Track{
 						Codec: &codecs.MPEG4Audio{
-							Config: forma.StreamMuxConfig.Programs[0].Layers[0].AudioSpecificConfig,
+							Config: origFormat.StreamMuxConfig.Programs[0].Layers[0].AudioSpecificConfig,
 						},
 					}
 					tracks = append(tracks, track)
 
 					r.OnData(
-						media,
-						forma,
+						origMedia,
+						origFormat,
 						func(u *unit.Unit) error {
 							if u.NilPayload() {
 								return nil
 							}
 
 							var ame mpeg4audio.AudioMuxElement
-							ame.StreamMuxConfig = forma.StreamMuxConfig
+							ame.StreamMuxConfig = origFormat.StreamMuxConfig
 							err := ame.Unmarshal(u.Payload.(unit.PayloadMPEG4AudioLATM))
 							if err != nil {
 								return err
@@ -309,7 +320,7 @@ func FromStream(
 							nconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 							return (*w).WriteMPEG4Audio(
 								track,
-								timestampToDuration(u.PTS, forma.ClockRate()),
+								timestampToDuration(u.PTS, origFormat.ClockRate()),
 								ame.Payloads[0][0][0],
 							)
 						})
@@ -324,8 +335,8 @@ func FromStream(
 					tracks = append(tracks, track)
 
 					r.OnData(
-						media,
-						forma,
+						origMedia,
+						origFormat,
 						func(u *unit.Unit) error {
 							if u.NilPayload() {
 								return nil
@@ -343,14 +354,14 @@ func FromStream(
 								nconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 								err = (*w).WriteMPEG1Audio(
 									track,
-									timestampToDuration(pts, forma.ClockRate()),
+									timestampToDuration(pts, origFormat.ClockRate()),
 									frame)
 								if err != nil {
 									return err
 								}
 
 								pts += int64(h.SampleCount()) *
-									int64(forma.ClockRate()) / int64(h.SampleRate)
+									int64(origFormat.ClockRate()) / int64(h.SampleRate)
 							}
 
 							return nil
@@ -361,15 +372,15 @@ func FromStream(
 				if slices.Contains(conn.FourCcList, any(fourCCToString(message.FourCCAC3))) {
 					track := &gortmplib.Track{
 						Codec: &codecs.AC3{
-							SampleRate:   forma.SampleRate,
-							ChannelCount: forma.ChannelCount,
+							SampleRate:   origFormat.SampleRate,
+							ChannelCount: origFormat.ChannelCount,
 						},
 					}
 					tracks = append(tracks, track)
 
 					r.OnData(
-						media,
-						forma,
+						origMedia,
+						origFormat,
 						func(u *unit.Unit) error {
 							if u.NilPayload() {
 								return nil
@@ -381,7 +392,7 @@ func FromStream(
 								nconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 								err := (*w).WriteAC3(
 									track,
-									timestampToDuration(pts, forma.ClockRate()),
+									timestampToDuration(pts, origFormat.ClockRate()),
 									frame)
 								if err != nil {
 									return err
@@ -393,19 +404,19 @@ func FromStream(
 				}
 
 			case *format.G711:
-				if forma.SampleRate == 8000 && (isEnhanced || legacyAudioTrackCount == 0) {
+				if origFormat.SampleRate == 8000 && (isEnhanced || legacyAudioTrackCount == 0) {
 					legacyAudioTrackCount++
 					track := &gortmplib.Track{
 						Codec: &codecs.G711{
-							MULaw:        forma.MULaw,
-							ChannelCount: forma.ChannelCount,
+							MULaw:        origFormat.MULaw,
+							ChannelCount: origFormat.ChannelCount,
 						},
 					}
 					tracks = append(tracks, track)
 
 					r.OnData(
-						media,
-						forma,
+						origMedia,
+						origFormat,
 						func(u *unit.Unit) error {
 							if u.NilPayload() {
 								return nil
@@ -414,32 +425,32 @@ func FromStream(
 							nconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 							return (*w).WriteG711(
 								track,
-								timestampToDuration(u.PTS, forma.ClockRate()),
+								timestampToDuration(u.PTS, origFormat.ClockRate()),
 								u.Payload.(unit.PayloadG711),
 							)
 						})
 				}
 
 			case *format.LPCM:
-				if (forma.ChannelCount == 1 || forma.ChannelCount == 2) &&
-					(forma.SampleRate == 5512 ||
-						forma.SampleRate == 11025 ||
-						forma.SampleRate == 22050 ||
-						forma.SampleRate == 44100) &&
+				if (origFormat.ChannelCount == 1 || origFormat.ChannelCount == 2) &&
+					(origFormat.SampleRate == 5512 ||
+						origFormat.SampleRate == 11025 ||
+						origFormat.SampleRate == 22050 ||
+						origFormat.SampleRate == 44100) &&
 					(isEnhanced || legacyAudioTrackCount == 0) {
 					legacyAudioTrackCount++
 					track := &gortmplib.Track{
 						Codec: &codecs.LPCM{
-							BitDepth:     forma.BitDepth,
-							SampleRate:   forma.SampleRate,
-							ChannelCount: forma.ChannelCount,
+							BitDepth:     origFormat.BitDepth,
+							SampleRate:   origFormat.SampleRate,
+							ChannelCount: origFormat.ChannelCount,
 						},
 					}
 					tracks = append(tracks, track)
 
 					r.OnData(
-						media,
-						forma,
+						origMedia,
+						origFormat,
 						func(u *unit.Unit) error {
 							if u.NilPayload() {
 								return nil
@@ -448,8 +459,46 @@ func FromStream(
 							nconn.SetWriteDeadline(time.Now().Add(writeTimeout))
 							return (*w).WriteLPCM(
 								track,
-								timestampToDuration(u.PTS, forma.ClockRate()),
+								timestampToDuration(u.PTS, origFormat.ClockRate()),
 								u.Payload.(unit.PayloadLPCM),
+							)
+						})
+				}
+
+			case *format.Generic:
+				if strings.HasPrefix(strings.ToLower(origFormat.RTPMap()), "flac/") &&
+					slices.Contains(conn.FourCcList, any(fourCCToString(message.FourCCFLAC))) {
+					enc, err := hex.DecodeString(origFormat.FMT["streaminfo"])
+					if err != nil {
+						return err
+					}
+
+					var streamInfo flac.StreamInfo
+					err = streamInfo.Unmarshal(enc)
+					if err != nil {
+						return err
+					}
+
+					track := &gortmplib.Track{
+						Codec: &codecs.FLAC{
+							StreamInfo: &streamInfo,
+						},
+					}
+					tracks = append(tracks, track)
+
+					r.OnData(
+						origMedia,
+						origFormat,
+						func(u *unit.Unit) error {
+							if u.NilPayload() {
+								return nil
+							}
+
+							nconn.SetWriteDeadline(time.Now().Add(writeTimeout))
+							return (*w).WriteFLAC(
+								track,
+								timestampToDuration(u.PTS, origFormat.ClockRate()),
+								u.Payload.(unit.PayloadFLAC),
 							)
 						})
 				}
@@ -473,10 +522,10 @@ func FromStream(
 	setuppedFormats := r.Formats()
 
 	n := 1
-	for _, media := range desc.Medias {
-		for _, forma := range media.Formats {
-			if !slices.Contains(setuppedFormats, forma) {
-				r.Parent.Log(logger.Warn, "skipping track %d (%s)", n, formatlabel.FormatToLabel(forma))
+	for _, origMedia := range origDesc.Medias {
+		for _, origFormat := range origMedia.Formats {
+			if !slices.Contains(setuppedFormats, origFormat) {
+				r.Parent.Log(logger.Warn, "skipping track %d (%s)", n, formatlabel.FormatToLabel(origFormat))
 			}
 			n++
 		}

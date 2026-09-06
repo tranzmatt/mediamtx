@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -44,26 +43,21 @@ func httpPullFile(t *testing.T, hc *http.Client, u string) []byte {
 }
 
 func TestMetrics(t *testing.T) {
-	serverCertFpath, err := test.CreateTempFile(test.TLSCertPub)
-	require.NoError(t, err)
-	defer os.Remove(serverCertFpath)
+	serverCertFpath := test.CreateTempFile(t, test.TLSCertPub)
+	serverKeyFpath := test.CreateTempFile(t, test.TLSCertKey)
 
-	serverKeyFpath, err := test.CreateTempFile(test.TLSCertKey)
-	require.NoError(t, err)
-	defer os.Remove(serverKeyFpath)
-
-	p, ok := newInstance("api: yes\n" +
-		"hlsAlwaysRemux: yes\n" +
-		"metrics: yes\n" +
-		"webrtcServerCert: " + serverCertFpath + "\n" +
-		"webrtcServerKey: " + serverKeyFpath + "\n" +
-		"rtspEncryption: optional\n" +
-		"rtspServerCert: " + serverCertFpath + "\n" +
-		"rtspServerKey: " + serverKeyFpath + "\n" +
-		"rtmpEncryption: optional\n" +
-		"rtmpServerCert: " + serverCertFpath + "\n" +
-		"rtmpServerKey: " + serverKeyFpath + "\n" +
-		"paths:\n" +
+	p, ok := newInstance(t, "api: yes\n"+
+		"hlsAlwaysRemux: yes\n"+
+		"metrics: yes\n"+
+		"webrtcServerCert: "+serverCertFpath+"\n"+
+		"webrtcServerKey: "+serverKeyFpath+"\n"+
+		"rtspEncryption: optional\n"+
+		"rtspServerCert: "+serverCertFpath+"\n"+
+		"rtspServerKey: "+serverKeyFpath+"\n"+
+		"rtmpEncryption: optional\n"+
+		"rtmpServerCert: "+serverCertFpath+"\n"+
+		"rtmpServerKey: "+serverKeyFpath+"\n"+
+		"paths:\n"+
 		"  all_others:\n")
 	require.Equal(t, true, ok)
 	defer p.Close()
@@ -269,6 +263,11 @@ webrtc_sessions_rtp_packets_jitter 0
 webrtc_sessions_rtcp_packets_received 0
 webrtc_sessions_rtcp_packets_sent 0
 
+# MoQ sessions
+moq_sessions 0
+moq_sessions_inbound_bytes 0
+moq_sessions_outbound_bytes 0
+
 `, string(bo))
 	})
 
@@ -376,7 +375,7 @@ webrtc_sessions_rtcp_packets_sent 0
 			defer tr2.CloseIdleConnections()
 			hc2 := &http.Client{Transport: tr2}
 
-			track := &webrtc.OutgoingTrack{
+			track := &webrtc.OutboundTrack{
 				Caps: pwebrtc.RTPCodecCapability{
 					MimeType:    pwebrtc.MimeTypeH264,
 					ClockRate:   90000,
@@ -389,7 +388,7 @@ webrtc_sessions_rtcp_packets_sent 0
 				URL:            su,
 				Log:            test.NilLogger,
 				Publish:        true,
-				OutgoingTracks: []*webrtc.OutgoingTrack{track},
+				OutboundTracks: []*webrtc.OutboundTrack{track},
 			}
 
 			err2 = s.Initialize(context.Background())
@@ -503,6 +502,11 @@ webrtc_sessions_rtcp_packets_sent 0
 			"paths_bytes_received 0\n"+
 			"paths_bytes_sent 0\n"+
 			"paths_readers 0\n"+
+			"\n"+
+			"# MoQ sessions\n"+
+			"moq_sessions 0\n"+
+			"moq_sessions_inbound_bytes 0\n"+
+			"moq_sessions_outbound_bytes 0\n"+
 			"\n",
 			string(bo))
 	})

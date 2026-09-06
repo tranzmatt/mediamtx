@@ -117,6 +117,7 @@ type Server struct {
 	PartDuration    conf.Duration
 	SegmentMaxSize  conf.StringSize
 	Directory       string
+	CDNSecret       string
 	ReadTimeout     conf.Duration
 	WriteTimeout    conf.Duration
 	MuxerCloseAfter conf.Duration
@@ -170,6 +171,7 @@ func (s *Server) Initialize() error {
 		trustedProxies: s.TrustedProxies,
 		readTimeout:    s.ReadTimeout,
 		writeTimeout:   s.WriteTimeout,
+		cdnSecret:      s.CDNSecret,
 		pathManager:    s.PathManager,
 		parent:         s,
 	}
@@ -179,7 +181,7 @@ func (s *Server) Initialize() error {
 		return err
 	}
 
-	str := "listener opened on " + s.Address
+	str := "started with listener on " + s.Address
 	if !s.Encryption {
 		str += " (TCP/HTTP)"
 	} else {
@@ -204,7 +206,7 @@ func (s *Server) Log(level logger.Level, format string, args ...any) {
 
 // Close closes the server.
 func (s *Server) Close() {
-	s.Log(logger.Info, "listener is closing")
+	s.Log(logger.Info, "closing")
 
 	if !interfaceIsEmpty(s.Metrics) {
 		s.Metrics.SetHLSServer(nil)

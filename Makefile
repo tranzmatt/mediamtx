@@ -1,6 +1,6 @@
-BASE_IMAGE = golang:1.25-alpine3.22
-GOLANGCI_LINT_IMAGE = golangci/golangci-lint:v2.11.4
-NODE_IMAGE = node:20-alpine3.22
+BASE_IMAGE = golang:1.26-alpine3.24
+GOLANGCI_LINT_IMAGE = golangci/golangci-lint:v2.12.2
+NODE_IMAGE = node:24-alpine3.24
 ALPINE_IMAGE = alpine:3.20
 DEBIAN_IMAGE = debian:bookworm
 RPI32_IMAGE = balenalib/raspberry-pi:bullseye-run-20240508

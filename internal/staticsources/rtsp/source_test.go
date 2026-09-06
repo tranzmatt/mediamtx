@@ -3,7 +3,6 @@ package rtsp
 import (
 	"context"
 	"crypto/tls"
-	"os"
 	"testing"
 	"time"
 
@@ -19,12 +18,6 @@ import (
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/test"
 )
-
-func ptrOf[T any](v T) *T {
-	p := new(T)
-	*p = v
-	return p
-}
 
 type testServer struct {
 	onDescribe func(*gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error)
@@ -131,15 +124,8 @@ func TestSource(t *testing.T) {
 				s.UDPRTCPAddress = "127.0.0.1:8003"
 
 			case "rtsps", "rtsps+http", "rtsps+ws":
-				var serverCertFpath string
-				serverCertFpath, err = test.CreateTempFile(test.TLSCertPub)
-				require.NoError(t, err)
-				defer os.Remove(serverCertFpath)
-
-				var serverKeyFpath string
-				serverKeyFpath, err = test.CreateTempFile(test.TLSCertKey)
-				require.NoError(t, err)
-				defer os.Remove(serverKeyFpath)
+				serverCertFpath := test.CreateTempFile(t, test.TLSCertPub)
+				serverKeyFpath := test.CreateTempFile(t, test.TLSCertKey)
 
 				var cert tls.Certificate
 				cert, err = tls.LoadX509KeyPair(serverCertFpath, serverKeyFpath)
@@ -312,6 +298,96 @@ func TestNoPassword(t *testing.T) {
 				RTSPTransport:          sp,
 				RTSPUDPSourcePortRange: []uint{10000, 65535},
 			},
+		})
+		close(done)
+	}()
+
+	<-p.Unit
+}
+
+func TestScale(t *testing.T) {
+	var strm *gortsplib.ServerStream
+
+	media0 := test.UniqueMediaH264()
+
+	s := gortsplib.Server{
+		Handler: &testServer{
+			onDescribe: func(_ *gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, strm, nil
+			},
+			onSetup: func(_ *gortsplib.ServerHandlerOnSetupCtx) (*base.Response, *gortsplib.ServerStream, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, strm, nil
+			},
+			onPlay: func(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
+				require.Equal(t, base.HeaderValue{"-1.0"}, ctx.Request.Header["Scale"])
+
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					err := strm.WritePacketRTP(media0, &rtp.Packet{
+						Header: rtp.Header{
+							Version:        0x02,
+							PayloadType:    96,
+							SequenceNumber: 57899,
+							Timestamp:      345234345,
+							SSRC:           978651231,
+							Marker:         true,
+						},
+						Payload: []byte{5, 1, 2, 3, 4},
+					})
+					require.NoError(t, err)
+				}()
+
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+		},
+		RTSPAddress: "127.0.0.1:8555",
+	}
+
+	err := s.Start()
+	require.NoError(t, err)
+	defer s.Close()
+
+	strm = &gortsplib.ServerStream{
+		Server: &s,
+		Desc:   &description.Session{Medias: []*description.Media{media0}},
+	}
+	err = strm.Initialize()
+	require.NoError(t, err)
+	defer strm.Close()
+
+	cnf := &conf.Path{
+		RTSPUDPSourcePortRange: []uint{10000, 65535},
+		RTSPScale:              "-1.0",
+	}
+
+	p := &test.StaticSourceParent{}
+	p.Initialize()
+	defer p.Close()
+
+	so := &Source{
+		ReadTimeout:    conf.Duration(10 * time.Second),
+		WriteTimeout:   conf.Duration(10 * time.Second),
+		WriteQueueSize: 2048,
+		Parent:         p,
+	}
+
+	done := make(chan struct{})
+	defer func() { <-done }()
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+
+	go func() {
+		so.Run(defs.StaticSourceRunParams{ //nolint:errcheck
+			Context:        ctx,
+			ResolvedSource: "rtsp://127.0.0.1:8555/teststream",
+			Conf:           cnf,
 		})
 		close(done)
 	}()
@@ -522,7 +598,7 @@ func TestSkipBackChannel(t *testing.T) {
 			Context:        ctx,
 			ResolvedSource: "rtsp://127.0.0.1:8555/teststream",
 			Conf: &conf.Path{
-				RTSPTransport:          conf.RTSPTransport{Protocol: ptrOf(gortsplib.ProtocolTCP)},
+				RTSPTransport:          conf.RTSPTransport{Protocol: new(gortsplib.ProtocolTCP)},
 				RTSPUDPSourcePortRange: []uint{10000, 65535},
 			},
 		})
@@ -598,7 +674,7 @@ func TestOnlyBackChannelsError(t *testing.T) {
 		Context:        ctx,
 		ResolvedSource: "rtsp://127.0.0.1:8555/teststream",
 		Conf: &conf.Path{
-			RTSPTransport:          conf.RTSPTransport{Protocol: ptrOf(gortsplib.ProtocolTCP)},
+			RTSPTransport:          conf.RTSPTransport{Protocol: new(gortsplib.ProtocolTCP)},
 			RTSPUDPSourcePortRange: []uint{10000, 65535},
 		},
 	})
