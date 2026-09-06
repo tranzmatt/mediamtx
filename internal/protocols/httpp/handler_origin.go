@@ -8,27 +8,14 @@ import (
 	"strings"
 )
 
-func isOriginAllowed(origin string, allowOrigins []string) (string, bool) {
+func isOriginAllowed(origin string, allowOrigins []string) bool {
 	if len(allowOrigins) == 0 {
-		return "", false
-	}
-
-	for _, o := range allowOrigins {
-		if o == "*" {
-			if origin != "" {
-				return origin, true
-			}
-			return "*", true
-		}
-	}
-
-	if origin == "" {
-		return "", false
+		return false
 	}
 
 	originURL, err := url.Parse(origin)
 	if err != nil || originURL.Scheme == "" {
-		return "", false
+		return false
 	}
 
 	if originURL.Port() == "" && originURL.Scheme != "" {
@@ -41,6 +28,10 @@ func isOriginAllowed(origin string, allowOrigins []string) (string, bool) {
 	}
 
 	for _, o := range allowOrigins {
+		if o == "*" {
+			return true
+		}
+
 		allowedURL, errAllowed := url.Parse(o)
 		if errAllowed != nil {
 			continue
@@ -56,35 +47,37 @@ func isOriginAllowed(origin string, allowOrigins []string) (string, bool) {
 		}
 
 		if allowedURL.Scheme == originURL.Scheme &&
-			allowedURL.Host == originURL.Host &&
-			allowedURL.Port() == originURL.Port() {
-			return origin, true
+			allowedURL.Host == originURL.Host {
+			return true
 		}
 
-		if strings.Contains(allowedURL.Host, "*") {
-			pattern := strings.ReplaceAll(allowedURL.Host, "*.", "(.*\\.)?")
-			pattern = strings.ReplaceAll(pattern, "*", ".*")
+		if allowedURL.Scheme == originURL.Scheme &&
+			strings.Contains(allowedURL.Host, "*") {
+			pattern := regexp.QuoteMeta(allowedURL.Host)
+			pattern = strings.ReplaceAll(pattern, `\*\.`, `(.*\.)?`)
+			pattern = strings.ReplaceAll(pattern, `\*`, `.*`)
 			matched, errMatched := regexp.MatchString("^"+pattern+"$", originURL.Host)
 			if errMatched == nil && matched {
-				return origin, true
+				return true
 			}
 		}
 	}
 
-	return "", false
+	return false
 }
 
-// add Access-Control-Allow-Origin and Access-Control-Allow-Credentials headers.
+// add Access-Control-Allow-Origin header.
 type handlerOrigin struct {
 	h            http.Handler
 	allowOrigins []string
 }
 
 func (h *handlerOrigin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	origin, ok := isOriginAllowed(r.Header.Get("Origin"), h.allowOrigins)
-	if ok {
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	if origin := r.Header.Get("Origin"); origin != "" {
+		if ok := isOriginAllowed(origin, h.allowOrigins); ok {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		}
 	}
 
 	h.h.ServeHTTP(w, r)

@@ -8,11 +8,13 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/google/uuid"
+
+	"github.com/bluenviron/mediamtx/internal/certloader"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
-	"github.com/google/uuid"
-	"github.com/quic-go/webtransport-go"
+	"github.com/bluenviron/mediamtx/internal/protocols/moq"
 )
 
 // ErrSessionNotFound is returned when a session is not found.
@@ -37,7 +39,8 @@ type newSessionReq struct {
 	pathName  string
 	query     string
 	userAgent string
-	wt        *webtransport.Session
+	version   defs.APIMoQVersion
+	conn      moq.Conn
 	res       chan newSessionRes
 }
 
@@ -80,6 +83,7 @@ type serverMetrics interface {
 type Server struct {
 	HTTP2Address      string
 	HTTP3Address      string
+	QUICAddress       string
 	ServerKey         string
 	ServerCert        string
 	AllowOrigins      []string
@@ -91,10 +95,12 @@ type Server struct {
 	Metrics           serverMetrics
 	Parent            serverParent
 
-	ctx        context.Context
-	ctxCancel  context.CancelFunc
-	httpServer *httpServer
-	sessions   map[*session]struct{}
+	ctx            context.Context
+	ctxCancel      context.CancelFunc
+	loader         *certloader.CertLoader
+	httpServer     *httpServer
+	nativeListener *nativeListener
+	sessions       map[*session]struct{}
 
 	chNewSession      chan newSessionReq
 	chCloseSession    chan *session
@@ -106,25 +112,10 @@ type Server struct {
 
 // Initialize initializes the server.
 func (s *Server) Initialize() error {
-	s.httpServer = &httpServer{
-		http2Address:      s.HTTP2Address,
-		http3Address:      s.HTTP3Address,
-		serverKey:         s.ServerKey,
-		serverCert:        s.ServerCert,
-		allowOrigins:      s.AllowOrigins,
-		trustedProxies:    s.TrustedProxies,
-		udpReadBufferSize: s.UDPReadBufferSize,
-		readTimeout:       s.ReadTimeout,
-		writeTimeout:      s.WriteTimeout,
-		pathManager:       s.PathManager,
-		parent:            s,
-	}
-	err := s.httpServer.initialize()
-	if err != nil {
-		return err
-	}
+	ctx, ctxCancel := context.WithCancel(context.Background())
 
-	s.ctx, s.ctxCancel = context.WithCancel(context.Background())
+	s.ctx = ctx
+	s.ctxCancel = ctxCancel
 	s.sessions = make(map[*session]struct{})
 	s.chNewSession = make(chan newSessionReq)
 	s.chCloseSession = make(chan *session)
@@ -133,7 +124,56 @@ func (s *Server) Initialize() error {
 	s.chAPISessionsKick = make(chan serverAPISessionsKickReq)
 	s.done = make(chan struct{})
 
-	s.Log(logger.Info, "started with listeners on %s (TCP/HTTP2), %s (UDP/HTTP3)", s.HTTP2Address, s.HTTP3Address)
+	s.loader = &certloader.CertLoader{
+		CertPath:  s.ServerCert,
+		KeyPath:   s.ServerKey,
+		AllowAuto: true,
+		Parent:    s,
+	}
+	err := s.loader.Initialize()
+	if err != nil {
+		ctxCancel()
+		return err
+	}
+
+	s.httpServer = &httpServer{
+		http2Address:      s.HTTP2Address,
+		http3Address:      s.HTTP3Address,
+		getCertificate:    s.loader.GetCertificate,
+		allowOrigins:      s.AllowOrigins,
+		trustedProxies:    s.TrustedProxies,
+		udpReadBufferSize: s.UDPReadBufferSize,
+		readTimeout:       s.ReadTimeout,
+		writeTimeout:      s.WriteTimeout,
+		pathManager:       s.PathManager,
+		parent:            s,
+	}
+	err = s.httpServer.initialize()
+	if err != nil {
+		s.loader.Close()
+		ctxCancel()
+		return err
+	}
+
+	s.nativeListener = &nativeListener{
+		address:           s.QUICAddress,
+		getCertificate:    s.loader.GetCertificate,
+		udpReadBufferSize: s.UDPReadBufferSize,
+		parent:            s,
+	}
+	err = s.nativeListener.initialize()
+	if err != nil {
+		s.httpServer.close()
+		s.loader.Close()
+		ctxCancel()
+		return err
+	}
+
+	s.Log(logger.Info,
+		"started with listeners on %s (TCP/HTTP2), %s (UDP/HTTP3), %s (UDP/QUIC)",
+		s.HTTP2Address,
+		s.HTTP3Address,
+		s.QUICAddress)
 
 	go s.run()
 
@@ -159,6 +199,8 @@ func (s *Server) Close() {
 
 	s.ctxCancel()
 	<-s.done
+
+	s.Log(logger.Debug, "closed")
 }
 
 func (s *Server) run() {
@@ -171,11 +213,12 @@ outer:
 		select {
 		case req := <-s.chNewSession:
 			sx := &session{
-				wt:          req.wt,
+				conn:        req.conn,
 				wg:          &wg,
 				pathName:    req.pathName,
 				query:       req.query,
 				userAgent:   req.userAgent,
+				version:     req.version,
 				pathManager: s.PathManager,
 				parent:      s,
 			}
@@ -230,12 +273,20 @@ outer:
 		}
 	}
 
-	// close sessions before closing UDP packet listener
+	// close sessions before closing packet listeners
 	for sx := range s.sessions {
 		sx.Close()
 	}
 
+	if s.nativeListener != nil {
+		s.nativeListener.close()
+	}
+
 	s.httpServer.close()
+
+	if s.loader != nil {
+		s.loader.Close()
+	}
 
 	wg.Wait()
 }

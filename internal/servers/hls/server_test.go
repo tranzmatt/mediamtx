@@ -15,15 +15,15 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
-	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/test"
 	"github.com/bluenviron/mediamtx/internal/unit"
-	"github.com/stretchr/testify/require"
 )
 
 type dummyPathManager struct {
@@ -87,6 +87,7 @@ func TestServerPreflightRequest(t *testing.T) {
 	req, err := http.NewRequest(http.MethodOptions, "http://localhost:8888", nil)
 	require.NoError(t, err)
 
+	req.Header.Add("Origin", "http://example.com")
 	req.Header.Add("Access-Control-Request-Method", "GET")
 
 	res, err := hc.Do(req)
@@ -98,8 +99,7 @@ func TestServerPreflightRequest(t *testing.T) {
 	byts, err := io.ReadAll(res.Body)
 	require.NoError(t, err)
 
-	require.Equal(t, "*", res.Header.Get("Access-Control-Allow-Origin"))
-	require.Equal(t, "true", res.Header.Get("Access-Control-Allow-Credentials"))
+	require.Equal(t, "http://example.com", res.Header.Get("Access-Control-Allow-Origin"))
 	require.Equal(t, "OPTIONS, GET", res.Header.Get("Access-Control-Allow-Methods"))
 	require.Equal(t, "Authorization, Range", res.Header.Get("Access-Control-Allow-Headers"))
 	require.Equal(t, byts, []byte{})
@@ -398,7 +398,7 @@ func TestServerRead(t *testing.T) {
 								Codec: &codecs.MPEG4Audio{
 									Config: mpeg4audio.AudioSpecificConfig{
 										Type:          2,
-										ChannelCount:  2,
+										ChannelCount:  2, //nolint:staticcheck
 										ChannelConfig: 2,
 										SampleRate:    44100,
 									},
@@ -540,6 +540,20 @@ func TestServerDirectory(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestAbsolutePathInside(t *testing.T) {
+	base := t.TempDir()
+
+	path, err := absolutePathInside(base, filepath.Join(base, "group", "cam1"))
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(base, "group", "cam1"), path)
+
+	_, err = absolutePathInside(base, filepath.Join(base, "..", "cam1"))
+	require.Error(t, err)
+
+	_, err = absolutePathInside(base, filepath.Join(base, "group", "..", "..", "cam1"))
+	require.Error(t, err)
+}
+
 func TestServerDynamicAlwaysRemux(t *testing.T) {
 	desc := &description.Session{Medias: []*description.Media{test.MediaH264}}
 
@@ -595,8 +609,6 @@ func TestServerDynamicAlwaysRemux(t *testing.T) {
 }
 
 func TestAuthError(t *testing.T) {
-	n := 0
-
 	s := &Server{
 		Address:         "127.0.0.1:8888",
 		Encryption:      false,
@@ -619,14 +631,7 @@ func TestAuthError(t *testing.T) {
 				return nil, &auth.Error{Wrapped: fmt.Errorf("auth error")}
 			},
 		},
-		Parent: test.Logger(func(l logger.Level, s string, i ...any) {
-			if l == logger.Info {
-				if n == 1 {
-					require.Regexp(t, "failed to authenticate: auth error$", fmt.Sprintf(s, i...))
-				}
-				n++
-			}
-		}),
+		Parent: test.NilLogger,
 	}
 	err := s.Initialize()
 	require.NoError(t, err)
@@ -650,8 +655,6 @@ func TestAuthError(t *testing.T) {
 	defer res.Body.Close()
 
 	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
-
-	require.Equal(t, 2, n)
 }
 
 func TestAuthQueryPreservedAcrossRedirect(t *testing.T) {

@@ -1,5 +1,5 @@
 BASE_IMAGE = golang:1.26-alpine3.24
-GOLANGCI_LINT_IMAGE = golangci/golangci-lint:v2.12.2
+GOLANGCI_LINT_IMAGE = golangci/golangci-lint:v2.13.2
 NODE_IMAGE = node:24-alpine3.24
 ALPINE_IMAGE = alpine:3.20
 DEBIAN_IMAGE = debian:bookworm
@@ -27,6 +27,7 @@ help:
 	@echo "                   Valid PLATFORM options: amd64, rpi32, rpi64, jetson"
 	@echo "                   Valid USE_FFMPEG options: true, false, 1, 0"
 	@echo "  dockerhub        build and push images to Docker Hub"
+	@echo "  apidocs          generate API documentation"
 	@echo ""
 
 blank :=

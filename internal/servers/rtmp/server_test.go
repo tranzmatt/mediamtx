@@ -3,6 +3,7 @@ package rtmp
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/url"
 	"testing"
@@ -12,14 +13,15 @@ import (
 	"github.com/bluenviron/gortmplib/pkg/codecs"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/pires/go-proxyproto"
+	"github.com/stretchr/testify/require"
 
+	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/test"
 	"github.com/bluenviron/mediamtx/internal/unit"
-	"github.com/stretchr/testify/require"
 )
 
 type dummyPath struct{}
@@ -40,6 +42,77 @@ func (p *dummyPath) RemovePublisher(_ defs.PathRemovePublisherReq) {
 }
 
 func (p *dummyPath) RemoveReader(_ defs.PathRemoveReaderReq) {
+}
+
+func TestAuthError(t *testing.T) {
+	for _, ca := range []struct {
+		name    string
+		publish bool
+	}{
+		{name: "read", publish: false},
+		{name: "publish", publish: true},
+	} {
+		t.Run(ca.name, func(t *testing.T) {
+			for _, rawURL := range []string{
+				"rtmp://127.0.0.1:1939/teststream",
+				"rtmp://127.0.0.1:1939/teststream?user=myuser&pass=mypass",
+			} {
+				func() {
+					pathManager := &test.PathManager{}
+
+					if ca.publish {
+						pathManager.FindPathConfImpl = func(_ defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
+							return nil, &auth.Error{Wrapped: fmt.Errorf("auth error")}
+						}
+						pathManager.AddPublisherImpl = func(_ defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
+							return nil, fmt.Errorf("should not be called")
+						}
+					} else {
+						pathManager.AddReaderImpl = func(_ defs.PathAddReaderReq) (*defs.PathAddReaderRes, error) {
+							return nil, &auth.Error{Wrapped: fmt.Errorf("auth error")}
+						}
+						pathManager.FindPathConfImpl = func(_ defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
+							return nil, fmt.Errorf("should not be called")
+						}
+						pathManager.AddPublisherImpl = func(_ defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
+							return nil, fmt.Errorf("should not be called")
+						}
+					}
+
+					s := &Server{
+						Address:             "127.0.0.1:1939",
+						ReadTimeout:         conf.Duration(10 * time.Second),
+						WriteTimeout:        conf.Duration(10 * time.Second),
+						RTSPAddress:         "",
+						RunOnConnect:        "",
+						RunOnConnectRestart: false,
+						RunOnDisconnect:     "",
+						ExternalCmdPool:     nil,
+						PathManager:         pathManager,
+						Parent:              test.NilLogger,
+					}
+					err := s.Initialize()
+					require.NoError(t, err)
+					defer s.Close()
+
+					u, err := url.Parse(rawURL)
+					require.NoError(t, err)
+
+					conn := &gortmplib.Client{
+						URL:     u,
+						Publish: ca.publish,
+					}
+					err = conn.Initialize(context.Background())
+					if !ca.publish {
+						require.ErrorContains(t, err, "NetStream.Play.Failed")
+						return
+					}
+
+					require.ErrorContains(t, err, "NetStream.Publish.Unauthorized")
+				}()
+			}
+		})
+	}
 }
 
 func TestServerPublish(t *testing.T) {
@@ -73,11 +146,18 @@ func TestServerPublish(t *testing.T) {
 				n := 0
 
 				pathManager := &test.PathManager{
-					AddPublisherImpl: func(req defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
+					FindPathConfImpl: func(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
 						require.Equal(t, "teststream", req.AccessRequest.Name)
 						require.Equal(t, "user=myuser&pass=mypass&param=value", req.AccessRequest.Query)
 						require.Equal(t, "myuser", req.AccessRequest.Credentials.User)
 						require.Equal(t, "mypass", req.AccessRequest.Credentials.Pass)
+
+						return &defs.PathFindPathConfRes{User: req.AccessRequest.Credentials.User}, nil
+					},
+					AddPublisherImpl: func(req defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
+						require.Equal(t, "teststream", req.AccessRequest.Name)
+						require.Equal(t, "user=myuser&pass=mypass&param=value", req.AccessRequest.Query)
+						require.True(t, req.AccessRequest.SkipAuth)
 
 						strm = &stream.Stream{
 							OrigDesc:          req.Desc,
@@ -124,7 +204,6 @@ func TestServerPublish(t *testing.T) {
 
 						return &defs.PathAddPublisherRes{
 							Path:      &dummyPath{},
-							User:      req.AccessRequest.Credentials.User,
 							SubStream: subStream,
 						}, nil
 					},

@@ -2,16 +2,30 @@
 package reorderer
 
 import (
+	"slices"
 	"sync"
 
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/subgroup"
 )
 
+const (
+	maxPendingSubGroups = 50
+)
+
+func subGroupPayloadSize(sg *subgroup.SubGroup) int {
+	n := 0
+	for _, obj := range sg.Objects {
+		n += len(obj.Payload)
+	}
+	return n
+}
+
 // Reorderer is a subgroup reorderer.
 type Reorderer struct {
-	MaxReordered int
-	Parent       logger.Writer
+	Parent *Orchestrator
+
+	maxPendingSubGroups int
 
 	initialized bool
 	mu          sync.Mutex
@@ -21,6 +35,10 @@ type Reorderer struct {
 
 // Initialize initializes the reorderer.
 func (r *Reorderer) Initialize() {
+	if r.maxPendingSubGroups == 0 {
+		r.maxPendingSubGroups = maxPendingSubGroups
+	}
+
 	r.pending = make(map[uint64]*subgroup.SubGroup)
 }
 
@@ -37,14 +55,18 @@ func (r *Reorderer) Push(sg *subgroup.SubGroup) ([]*subgroup.SubGroup, error) {
 
 	switch {
 	case sg.Header.GroupID <= r.curGroupID:
-		r.Parent.Log(logger.Warn, "skipping out-of-order subgroup")
+		r.Parent.Parent.Log(logger.Warn, "skipping out-of-order subgroup")
 
 	case sg.Header.GroupID == r.curGroupID+1 && len(r.pending) == 0:
 		r.curGroupID = sg.Header.GroupID
 		return []*subgroup.SubGroup{sg}, nil
 
 	default:
+		if prev, ok := r.pending[sg.Header.GroupID]; ok {
+			r.Parent.removePendingBytes(subGroupPayloadSize(prev))
+		}
 		r.pending[sg.Header.GroupID] = sg
+		withinLimit := r.Parent.addPendingBytes(subGroupPayloadSize(sg))
 
 		diff := sg.Header.GroupID - r.curGroupID
 
@@ -55,10 +77,16 @@ func (r *Reorderer) Push(sg *subgroup.SubGroup) ([]*subgroup.SubGroup, error) {
 			}
 		}
 
-		if countInRange == diff {
+		switch {
+		case countInRange == diff:
 			return r.flushUpTo(sg.Header.GroupID), nil
-		} else if len(r.pending) > r.MaxReordered {
-			r.Parent.Log(logger.Warn, "too many reordered subgroups, flushing")
+
+		case len(r.pending) > r.maxPendingSubGroups:
+			r.Parent.Parent.Log(logger.Warn, "too many reordered subgroups, flushing")
+			return r.flushUpTo(sg.Header.GroupID), nil
+
+		case !withinLimit:
+			r.Parent.Parent.Log(logger.Warn, "too many reordered bytes, flushing")
 			return r.flushUpTo(sg.Header.GroupID), nil
 		}
 	}
@@ -67,22 +95,33 @@ func (r *Reorderer) Push(sg *subgroup.SubGroup) ([]*subgroup.SubGroup, error) {
 }
 
 func (r *Reorderer) flushUpTo(maxGroupID uint64) []*subgroup.SubGroup {
-	out := make([]*subgroup.SubGroup, 0, len(r.pending))
-	for i := r.curGroupID + 1; i <= maxGroupID; i++ {
-		if e, ok := r.pending[i]; ok {
-			out = append(out, e)
-			delete(r.pending, i)
+	ids := make([]uint64, 0, len(r.pending))
+	for id := range r.pending {
+		if id > r.curGroupID && id <= maxGroupID {
+			ids = append(ids, id)
 		}
 	}
+	slices.Sort(ids)
+
+	out := make([]*subgroup.SubGroup, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, r.pending[id])
+		r.Parent.removePendingBytes(subGroupPayloadSize(r.pending[id]))
+		delete(r.pending, id)
+	}
+
 	r.curGroupID = maxGroupID
+
 	for {
 		next, ok := r.pending[r.curGroupID+1]
 		if !ok {
 			break
 		}
 		out = append(out, next)
+		r.Parent.removePendingBytes(subGroupPayloadSize(next))
 		delete(r.pending, r.curGroupID+1)
 		r.curGroupID++
 	}
+
 	return out
 }

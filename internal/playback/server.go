@@ -8,12 +8,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
-	"github.com/gin-gonic/gin"
 )
 
 type serverAuthManager interface {
@@ -80,7 +81,10 @@ func (s *Server) Initialize() error {
 // Close closes Server.
 func (s *Server) Close() {
 	s.Log(logger.Info, "closing")
+
 	s.httpServer.Close()
+
+	s.Log(logger.Debug, "closed")
 }
 
 // Log implements logger.Writer.
@@ -133,25 +137,26 @@ func (s *Server) middlewarePreflightRequests(ctx *gin.Context) {
 
 func (s *Server) doAuth(ctx *gin.Context, pathName string) bool {
 	req := &auth.Request{
-		Action:      conf.AuthActionPlayback,
-		Path:        pathName,
-		Query:       ctx.Request.URL.RawQuery,
-		Credentials: httpp.Credentials(ctx.Request),
-		IP:          net.ParseIP(ctx.ClientIP()),
+		Action:               conf.AuthActionPlayback,
+		Path:                 pathName,
+		Query:                ctx.Request.URL.RawQuery,
+		Credentials:          httpp.Credentials(ctx.Request),
+		IP:                   net.ParseIP(ctx.ClientIP()),
+		EnableAskCredentials: true,
 	}
 
 	_, err := s.AuthManager.Authenticate(req)
 	if err != nil {
-		auth.DelayBruteForce(err)
-
 		if err.AskCredentials {
 			ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
 			s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 			return false
 		}
 
-		s.Log(logger.Info, "connection %v failed to authenticate: %v",
-			httpp.RemoteAddr(ctx), err.Wrapped)
+		auth.LogAndDelayError(&logger.InlineWriter{
+			Parent: s,
+			Prefix: fmt.Sprintf("[conn %v]", httpp.RemoteAddr(ctx)),
+		}, err)
 
 		s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 		return false

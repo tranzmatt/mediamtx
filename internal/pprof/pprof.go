@@ -83,7 +83,10 @@ func (pp *PPROF) Initialize() error {
 // Close closes PPROF.
 func (pp *PPROF) Close() {
 	pp.Log(logger.Info, "closing")
+
 	pp.httpServer.Close()
+
+	pp.Log(logger.Debug, "closed")
 }
 
 // Log implements logger.Writer.
@@ -110,23 +113,25 @@ func (pp *PPROF) writeErrorNoLog(ctx *gin.Context, status int, err error) {
 
 func (pp *PPROF) middlewareAuth(ctx *gin.Context) {
 	req := &auth.Request{
-		Action:      conf.AuthActionPprof,
-		Query:       ctx.Request.URL.RawQuery,
-		Credentials: httpp.Credentials(ctx.Request),
-		IP:          net.ParseIP(ctx.ClientIP()),
+		Action:               conf.AuthActionPprof,
+		Query:                ctx.Request.URL.RawQuery,
+		Credentials:          httpp.Credentials(ctx.Request),
+		IP:                   net.ParseIP(ctx.ClientIP()),
+		EnableAskCredentials: true,
 	}
 
 	_, err := pp.AuthManager.Authenticate(req)
 	if err != nil {
-		auth.DelayBruteForce(err)
-
 		if err.AskCredentials {
 			ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
 			pp.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 			return
 		}
 
-		pp.Log(logger.Info, "connection %v failed to authenticate: %v", httpp.RemoteAddr(ctx), err.Wrapped)
+		auth.LogAndDelayError(&logger.InlineWriter{
+			Parent: pp,
+			Prefix: fmt.Sprintf("[conn %v]", httpp.RemoteAddr(ctx)),
+		}, err)
 
 		pp.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 		return

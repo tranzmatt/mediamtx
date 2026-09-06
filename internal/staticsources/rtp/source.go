@@ -9,7 +9,9 @@ import (
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/rtptime"
-	"github.com/bluenviron/gortsplib/v5/pkg/sdp"
+	"github.com/bluenviron/gortsplib/v5/pkg/sdpunmarshaler"
+	"github.com/pion/rtp"
+
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/counterdumper"
 	"github.com/bluenviron/mediamtx/internal/defs"
@@ -20,7 +22,6 @@ import (
 	"github.com/bluenviron/mediamtx/internal/protocols/unix"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/unit"
-	"github.com/pion/rtp"
 )
 
 type parent interface {
@@ -42,16 +43,20 @@ func (s *Source) Log(level logger.Level, format string, args ...any) {
 	s.Parent.Log(level, "[RTP source] "+format, args...)
 }
 
+// Info returns runtime information.
+func (*Source) Info() defs.StaticSourceInfo {
+	return defs.StaticSourceInfo{}
+}
+
 // Run implements StaticSource.
 func (s *Source) Run(params defs.StaticSourceRunParams) error {
-	var sd sdp.SessionDescription
-	err := sd.Unmarshal([]byte(params.Conf.RTPSDP))
+	sd, err := sdpunmarshaler.Unmarshal([]byte(params.Conf.RTPSDP))
 	if err != nil {
 		return err
 	}
 
 	var desc description.Session
-	err = desc.Unmarshal(&sd)
+	err = desc.Unmarshal2(sd)
 	if err != nil {
 		return err
 	}

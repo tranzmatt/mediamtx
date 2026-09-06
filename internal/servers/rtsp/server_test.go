@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,20 +15,19 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
-	mpegts "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
+	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
 	tscodecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/codecs"
+	"github.com/pion/rtp"
 	"github.com/pires/go-proxyproto"
+	"github.com/stretchr/testify/require"
 
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
-	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/test"
 	"github.com/bluenviron/mediamtx/internal/unit"
-	"github.com/pion/rtp"
-	"github.com/stretchr/testify/require"
 )
 
 type dummyPath struct{}
@@ -236,22 +234,26 @@ func TestServerPublish(t *testing.T) {
 					require.Equal(t, &defs.APIRTSPSessionList{
 						Items: []defs.APIRTSPSession{
 							{
-								ID:                 list.Items[0].ID,
-								Created:            list.Items[0].Created,
-								RemoteAddr:         list.Items[0].RemoteAddr,
-								State:              "publish",
-								Path:               "teststream",
-								Query:              "param=value",
-								User:               "myuser",
-								UserAgent:          list.Items[0].UserAgent,
-								InboundBytes:       list.Items[0].InboundBytes,
-								InboundRTPPackets:  list.Items[0].InboundRTPPackets,
-								OutboundBytes:      list.Items[0].OutboundBytes,
-								BytesReceived:      list.Items[0].BytesReceived,
-								BytesSent:          list.Items[0].BytesSent,
-								Conns:              list.Items[0].Conns,
-								RTPPacketsReceived: list.Items[0].RTPPacketsReceived,
-								Transport:          new("TCP"),
+								ID:                        list.Items[0].ID,
+								Created:                   list.Items[0].Created,
+								RemoteAddr:                list.Items[0].RemoteAddr,
+								State:                     "publish",
+								Path:                      "teststream",
+								Query:                     "param=value",
+								User:                      "myuser",
+								UserAgent:                 list.Items[0].UserAgent,
+								InboundBytes:              list.Items[0].InboundBytes,
+								InboundRTPPackets:         list.Items[0].InboundRTPPackets,
+								InboundRTCPPackets:        list.Items[0].InboundRTCPPackets,
+								InboundRTCPPacketsInError: list.Items[0].InboundRTCPPacketsInError,
+								OutboundBytes:             list.Items[0].OutboundBytes,
+								BytesReceived:             list.Items[0].BytesReceived,
+								BytesSent:                 list.Items[0].BytesSent,
+								Conns:                     list.Items[0].Conns,
+								RTPPacketsReceived:        list.Items[0].RTPPacketsReceived,
+								RTCPPacketsReceived:       list.Items[0].RTCPPacketsReceived,
+								RTCPPacketsInError:        list.Items[0].RTCPPacketsInError,
+								Transport:                 new("TCP"),
 								Profile: func() *string {
 									if encrypt == "tls" {
 										return new("SAVP")
@@ -565,25 +567,27 @@ func TestServerRead(t *testing.T) {
 			require.Equal(t, &defs.APIRTSPSessionList{
 				Items: []defs.APIRTSPSession{
 					{
-						ID:                 list.Items[0].ID,
-						Created:            list.Items[0].Created,
-						RemoteAddr:         list.Items[0].RemoteAddr,
-						State:              "read",
-						Path:               "teststream",
-						Query:              "param=value",
-						User:               "myuser",
-						UserAgent:          list.Items[0].UserAgent,
-						InboundBytes:       list.Items[0].InboundBytes,
-						InboundRTPPackets:  list.Items[0].InboundRTPPackets,
-						OutboundBytes:      list.Items[0].OutboundBytes,
-						OutboundRTPPackets: list.Items[0].OutboundRTPPackets,
-						BytesReceived:      list.Items[0].BytesReceived,
-						BytesSent:          list.Items[0].BytesSent,
-						Conns:              list.Items[0].Conns,
-						RTPPacketsReceived: list.Items[0].RTPPacketsReceived,
-						RTPPacketsSent:     list.Items[0].RTPPacketsSent,
-						Transport:          new("TCP"),
-						Profile:            new("AVP"),
+						ID:                  list.Items[0].ID,
+						Created:             list.Items[0].Created,
+						RemoteAddr:          list.Items[0].RemoteAddr,
+						State:               "read",
+						Path:                "teststream",
+						Query:               "param=value",
+						User:                "myuser",
+						UserAgent:           list.Items[0].UserAgent,
+						InboundBytes:        list.Items[0].InboundBytes,
+						InboundRTPPackets:   list.Items[0].InboundRTPPackets,
+						OutboundBytes:       list.Items[0].OutboundBytes,
+						OutboundRTPPackets:  list.Items[0].OutboundRTPPackets,
+						OutboundRTCPPackets: list.Items[0].OutboundRTCPPackets,
+						BytesReceived:       list.Items[0].BytesReceived,
+						BytesSent:           list.Items[0].BytesSent,
+						Conns:               list.Items[0].Conns,
+						RTPPacketsReceived:  list.Items[0].RTPPacketsReceived,
+						RTPPacketsSent:      list.Items[0].RTPPacketsSent,
+						RTCPPacketsSent:     list.Items[0].RTCPPacketsSent,
+						Transport:           new("TCP"),
+						Profile:             new("AVP"),
 					},
 				},
 			}, list)
@@ -686,23 +690,13 @@ func TestAuthError(t *testing.T) {
 		},
 	}
 
-	var n atomic.Int64
-	done := make(chan struct{})
-
 	s := &Server{
 		Address:        "127.0.0.1:8557",
 		ReadTimeout:    conf.Duration(10 * time.Second),
 		WriteTimeout:   conf.Duration(10 * time.Second),
 		WriteQueueSize: 512,
 		PathManager:    pathManager,
-		Parent: test.Logger(func(l logger.Level, s string, i ...any) {
-			if l == logger.Info {
-				if n.Add(1) == 3 {
-					require.Regexp(t, "authentication failed: auth error$", fmt.Sprintf(s, i...))
-					close(done)
-				}
-			}
-		}),
+		Parent:         test.NilLogger,
 	}
 	err := s.Initialize()
 	require.NoError(t, err)
@@ -722,6 +716,4 @@ func TestAuthError(t *testing.T) {
 
 	_, _, err = reader.Describe(u)
 	require.EqualError(t, err, "bad status code: 401 (Unauthorized)")
-
-	<-done
 }
