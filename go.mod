@@ -27,9 +27,9 @@ require (
 	github.com/gookit/color v1.6.3
 	github.com/gorilla/websocket v1.5.3
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
-	github.com/matthewhartstonge/argon2 v1.6.3
+	github.com/matthewhartstonge/argon2 v1.6.4
 	github.com/minio/selfupdate v0.6.0
-	github.com/pion/ice/v4 v4.4.7
+	github.com/pion/ice/v4 v4.4.8
 	github.com/pion/interceptor v0.1.49
 	github.com/pion/logging v0.2.4
 	github.com/pion/rtcp v1.2.19
@@ -38,7 +38,7 @@ require (
 	github.com/pion/transport/v5 v5.1.1
 	github.com/pion/webrtc/v4 v4.2.24
 	github.com/pires/go-proxyproto v0.15.0
-	github.com/quic-go/quic-go v0.64.0
+	github.com/quic-go/quic-go v0.64.1
 	github.com/quic-go/webtransport-go v0.13.0
 	github.com/stretchr/testify v1.12.1
 	github.com/wlynxg/anet v0.0.5

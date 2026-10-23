@@ -9,12 +9,14 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/webtransport-go"
 
 	"github.com/bluenviron/mediamtx/internal/certloader"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
-	"github.com/bluenviron/mediamtx/internal/protocols/moq"
+	"github.com/bluenviron/mediamtx/internal/protocols/moq/version"
 )
 
 // ErrSessionNotFound is returned when a session is not found.
@@ -39,8 +41,9 @@ type newSessionReq struct {
 	pathName  string
 	query     string
 	userAgent string
-	version   defs.APIMoQVersion
-	conn      moq.Conn
+	version   version.Version
+	quicConn  *quic.Conn
+	wtSession *webtransport.Session
 	res       chan newSessionRes
 }
 
@@ -213,12 +216,13 @@ outer:
 		select {
 		case req := <-s.chNewSession:
 			sx := &session{
-				conn:        req.conn,
+				version:     req.version,
+				quicConn:    req.quicConn,
+				wtSession:   req.wtSession,
 				wg:          &wg,
 				pathName:    req.pathName,
 				query:       req.query,
 				userAgent:   req.userAgent,
-				version:     req.version,
 				pathManager: s.PathManager,
 				parent:      s,
 			}
